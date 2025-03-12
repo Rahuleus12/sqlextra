@@ -4,13 +4,6 @@
 USE cwizbank_adani;
 GO
 
--- Set compatibility level to SQL Server 2014 if needed
-IF (SELECT compatibility_level FROM sys.databases WHERE name = 'cwizbank_adani') <> 120
-BEGIN
-    ALTER DATABASE cwizbank_adani SET COMPATIBILITY_LEVEL = 120;
-END
-GO
-
 -- Create or alter the balance calculation procedure
 IF EXISTS (SELECT * FROM sys.objects WHERE type = 'P' AND name = 'update_member1_balances')
 BEGIN
@@ -42,7 +35,7 @@ BEGIN
                          CASE WHEN CREDIT IS NOT NULL THEN 0 ELSE 1 END
             ) as row_seq
         INTO #temp_ordered_transactions
-        FROM MEMBER1 t;
+        FROM [dbo].[MEMBER1] t;
 
         -- Process each account
         DECLARE @current_e_no VARCHAR(10)
@@ -87,7 +80,7 @@ BEGIN
 
                 UPDATE t
                 SET BALANCE = @running_balance
-                FROM MEMBER1 t
+                FROM [dbo].[MEMBER1] t
                 INNER JOIN #temp_ordered_transactions tot
                 ON t.E_NO = tot.E_NO
                 AND t.M_NO = tot.M_NO
@@ -124,7 +117,7 @@ BEGIN
             MAX([DATE]) as latest_date,
             SUM(ISNULL(CREDIT, 0)) as total_credits,
             SUM(ISNULL(DEBIT, 0)) as total_debits
-        FROM MEMBER1;
+        FROM [dbo].[MEMBER1];
     END TRY
     BEGIN CATCH
         IF @@TRANCOUNT > 0
@@ -156,10 +149,10 @@ BEGIN
         -- Mark the first transaction for each account as CWO
         UPDATE t
         SET OPERATOR = 'CWO'
-        FROM MEMBER1 t
+        FROM [dbo].[MEMBER1] t
         INNER JOIN (
             SELECT E_NO, M_NO, MIN([DATE]) as first_date
-            FROM MEMBER1
+            FROM [dbo].[MEMBER1]
             GROUP BY E_NO, M_NO
         ) f ON t.E_NO = f.E_NO 
             AND t.M_NO = f.M_NO 
@@ -172,7 +165,7 @@ BEGIN
         SELECT 
             COUNT(*) as total_cwo_records,
             COUNT(DISTINCT E_NO + M_NO) as total_accounts_marked
-        FROM MEMBER1
+        FROM [dbo].[MEMBER1]
         WHERE OPERATOR = 'CWO';
     END TRY
     BEGIN CATCH
@@ -203,14 +196,14 @@ BEGIN
     PRINT 'Checking for accounts missing CWO...';
     SELECT E_NO, M_NO,
            MAX(CASE WHEN OPERATOR = 'CWO' THEN 1 ELSE 0 END) as has_cwo
-    FROM MEMBER1
+    FROM [dbo].[MEMBER1]
     GROUP BY E_NO, M_NO
     HAVING MAX(CASE WHEN OPERATOR = 'CWO' THEN 1 ELSE 0 END) = 0;
     
     -- Check for invalid amounts
     PRINT 'Checking for invalid amounts...';
     SELECT E_NO, M_NO, [DATE], DEBIT, CREDIT, BALANCE, OPERATOR
-    FROM MEMBER1
+    FROM [dbo].[MEMBER1]
     WHERE (DEBIT IS NULL AND CREDIT IS NULL)
     OR (DEBIT < 0 OR CREDIT < 0);
     
@@ -226,7 +219,7 @@ BEGIN
             BALANCE,
             LAG(BALANCE) OVER (PARTITION BY E_NO, M_NO ORDER BY [DATE]) as prev_balance,
             CREDIT - DEBIT as expected_change
-        FROM MEMBER1
+        FROM [dbo].[MEMBER1]
     )
     SELECT E_NO, M_NO, [DATE], DEBIT, CREDIT, BALANCE, prev_balance, expected_change
     FROM BalanceChanges
@@ -242,7 +235,7 @@ BEGIN
         SUM(ISNULL(CREDIT, 0)) as total_credits,
         SUM(ISNULL(DEBIT, 0)) as total_debits,
         SUM(ISNULL(CREDIT, 0) - ISNULL(DEBIT, 0)) as net_balance
-    FROM MEMBER1;
+    FROM [dbo].[MEMBER1];
 END
 GO
 
@@ -256,7 +249,7 @@ SELECT
     c.is_nullable
 FROM sys.columns c
 INNER JOIN sys.types t ON c.user_type_id = t.user_type_id
-WHERE object_id = OBJECT_ID('MEMBER1')
+WHERE object_id = OBJECT_ID('[dbo].[MEMBER1]')
 ORDER BY c.column_id;
 
 -- Instructions for use:
