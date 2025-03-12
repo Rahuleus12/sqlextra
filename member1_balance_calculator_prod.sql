@@ -26,39 +26,93 @@ BEGIN
     BEGIN TRY
         BEGIN TRANSACTION;
         
-        -- Process each account's transactions in order
-        WITH OrderedTransactions AS (
-            SELECT 
-                E_NO,
-                M_NO,
-                [DATE],
-                DEBIT,
-                CREDIT,
-                OPERATOR,
-                ROW_NUMBER() OVER (
-                    PARTITION BY E_NO, M_NO 
-                    ORDER BY [DATE],
-                             CASE WHEN OPERATOR = 'CWO' THEN 0 ELSE 1 END,
-                             CASE WHEN CREDIT IS NOT NULL THEN 0 ELSE 1 END
-                ) as row_seq
-            FROM MEMBER1
-        )
-        UPDATE m
-        SET BALANCE = (
-            SELECT SUM(ISNULL(CREDIT, 0) - ISNULL(DEBIT, 0))
-            FROM OrderedTransactions ot2
-            WHERE ot2.E_NO = ot1.E_NO
-            AND ot2.M_NO = ot1.M_NO
-            AND ot2.row_seq <= ot1.row_seq
-        )
-        FROM MEMBER1 m
-        INNER JOIN OrderedTransactions ot1
-        ON m.E_NO = ot1.E_NO
-        AND m.M_NO = ot1.M_NO
-        AND m.[DATE] = ot1.[DATE]
-        AND ISNULL(m.CREDIT, 0) = ISNULL(ot1.CREDIT, 0)
-        AND ISNULL(m.DEBIT, 0) = ISNULL(ot1.DEBIT, 0)
-        AND ISNULL(m.OPERATOR, '') = ISNULL(ot1.OPERATOR, '');
+        -- Check if temporary table exists and drop it
+        IF OBJECT_ID('tempdb..#temp_ordered_transactions') IS NOT NULL
+        BEGIN
+            DROP TABLE #temp_ordered_transactions
+        END
+        
+        -- Create temporary table with ordered transactions
+        SELECT 
+            t.*,
+            ROW_NUMBER() OVER (
+                PARTITION BY E_NO, M_NO 
+                ORDER BY [DATE], 
+                         CASE WHEN OPERATOR = 'CWO' THEN 0 ELSE 1 END,
+                         CASE WHEN CREDIT IS NOT NULL THEN 0 ELSE 1 END
+            ) as row_seq
+        INTO #temp_ordered_transactions
+        FROM MEMBER1 t;
+
+        -- Process each account
+        DECLARE @current_e_no VARCHAR(10)
+        DECLARE @current_m_no VARCHAR(10)
+        DECLARE @running_balance DECIMAL(10,2)
+        DECLARE @max_seq INT
+        DECLARE @current_seq INT
+        DECLARE @current_credit DECIMAL(10,2)
+        DECLARE @current_debit DECIMAL(10,2)
+
+        -- Cursor for processing each account
+        DECLARE account_cursor CURSOR LOCAL FAST_FORWARD FOR 
+            SELECT DISTINCT E_NO, M_NO 
+            FROM #temp_ordered_transactions 
+            ORDER BY E_NO, M_NO
+
+        OPEN account_cursor
+        FETCH NEXT FROM account_cursor INTO @current_e_no, @current_m_no
+
+        WHILE @@FETCH_STATUS = 0
+        BEGIN
+            SET @running_balance = 0
+            
+            SELECT @max_seq = MAX(row_seq)
+            FROM #temp_ordered_transactions
+            WHERE E_NO = @current_e_no 
+            AND M_NO = @current_m_no
+
+            SET @current_seq = 1
+
+            WHILE @current_seq <= @max_seq
+            BEGIN
+                SELECT 
+                    @current_credit = ISNULL(CREDIT, 0),
+                    @current_debit = ISNULL(DEBIT, 0)
+                FROM #temp_ordered_transactions
+                WHERE E_NO = @current_e_no 
+                AND M_NO = @current_m_no
+                AND row_seq = @current_seq
+
+                SET @running_balance = @running_balance + @current_credit - @current_debit
+
+                UPDATE t
+                SET BALANCE = @running_balance
+                FROM MEMBER1 t
+                INNER JOIN #temp_ordered_transactions tot
+                ON t.E_NO = tot.E_NO
+                AND t.M_NO = tot.M_NO
+                AND t.[DATE] = tot.[DATE]
+                AND ISNULL(t.CREDIT, 0) = ISNULL(tot.CREDIT, 0)
+                AND ISNULL(t.DEBIT, 0) = ISNULL(tot.DEBIT, 0)
+                AND ISNULL(t.OPERATOR, '') = ISNULL(tot.OPERATOR, '')
+                WHERE tot.E_NO = @current_e_no
+                AND tot.M_NO = @current_m_no
+                AND tot.row_seq = @current_seq
+
+                SET @current_seq = @current_seq + 1
+            END
+
+            FETCH NEXT FROM account_cursor INTO @current_e_no, @current_m_no
+        END
+
+        CLOSE account_cursor
+        DEALLOCATE account_cursor
+
+        -- Clean up
+        IF OBJECT_ID('tempdb..#temp_ordered_transactions') IS NOT NULL
+        BEGIN
+            DROP TABLE #temp_ordered_transactions
+        END
 
         COMMIT TRANSACTION;
         
