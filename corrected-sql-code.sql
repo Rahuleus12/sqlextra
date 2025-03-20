@@ -12,13 +12,13 @@ SELECT COLUMN_NAME as column_name,
        NUMERIC_SCALE as scale,
        IS_NULLABLE as is_nullable
 FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_NAME = 'MEMBER_LOANS';
+WHERE TABLE_NAME = 'PLOAN1';
 GO
 
 -- Create index for better performance
-IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_MEMBER_LOANS_Account_Loan_Date' AND object_id = OBJECT_ID('[dbo].[MEMBER_LOANS]'))
+IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_PLOAN1_Account_Loan_Date' AND object_id = OBJECT_ID('[dbo].[PLOAN1]'))
 BEGIN
-    CREATE INDEX IX_MEMBER_LOANS_Account_Loan_Date ON [dbo].[MEMBER_LOANS] (M_NO, LOAN_NO, [DATE]);
+    CREATE INDEX IX_PLOAN1_Account_Loan_Date ON [dbo].[PLOAN1] (M_NO, LOAN_NO, [DATE]);
 END
 GO
 
@@ -55,14 +55,14 @@ BEGIN
                         ELSE 3 -- Both or neither
                     END,
                     -- Unique identifier to ensure consistent ordering for rows with identical values
-                    (SELECT $IDENTITY FROM [dbo].[MEMBER_LOANS] i WHERE i.M_NO = t.M_NO AND i.LOAN_NO = t.LOAN_NO AND i.[DATE] = t.[DATE] 
+                    (SELECT $IDENTITY FROM [dbo].[PLOAN1] i WHERE i.M_NO = t.M_NO AND i.LOAN_NO = t.LOAN_NO AND i.[DATE] = t.[DATE] 
                         AND ISNULL(i.PRINCIPLE, 0) = ISNULL(t.PRINCIPLE, 0) 
                         AND ISNULL(i.INTEREST, 0) = ISNULL(t.INTEREST, 0)
                         AND ISNULL(i.DEBIT, 0) = ISNULL(t.DEBIT, 0)
                         AND ISNULL(i.OPERATOR, '') = ISNULL(t.OPERATOR, ''))
             ) as row_seq
         INTO #temp_ordered_transactions
-        FROM [dbo].[MEMBER_LOANS] t;
+        FROM [dbo].[PLOAN1] t;
 
         -- Add identity column to ensure unique matching during update
         ALTER TABLE #temp_ordered_transactions ADD tmp_id INT IDENTITY(1,1) PRIMARY KEY;
@@ -87,7 +87,7 @@ BEGIN
         SET 
             ml.BALANCE = tbu.calculated_balance,
             ml.TOTAL = tbu.calculated_total
-        FROM [dbo].[MEMBER_LOANS] ml
+        FROM [dbo].[PLOAN1] ml
         INNER JOIN #temp_balance_updates tbu ON 
             ml.M_NO = tbu.M_NO AND
             ml.LOAN_NO = tbu.LOAN_NO AND
@@ -108,14 +108,14 @@ BEGIN
         SELECT 
             @earliest_date = MIN([DATE]),
             @latest_date = MAX([DATE])
-        FROM [dbo].[MEMBER_LOANS];
+        FROM [dbo].[PLOAN1];
 
         SELECT
             @loans_processed = COUNT(DISTINCT CONCAT(M_NO, '-', LOAN_NO)),
             @total_principles = SUM(ISNULL(PRINCIPLE, 0)),
             @total_interests = SUM(ISNULL(INTEREST, 0)),
             @total_debits = SUM(ISNULL(DEBIT, 0))
-        FROM [dbo].[MEMBER_LOANS];
+        FROM [dbo].[PLOAN1];
 
         -- Return summary
         SELECT 
@@ -128,7 +128,7 @@ BEGIN
             @total_interests as total_interests,
             @total_debits as total_debits,
             (@total_principles + @total_interests) - @total_debits as net_balance
-        FROM [dbo].[MEMBER_LOANS];
+        FROM [dbo].[PLOAN1];
 
     END TRY
     BEGIN CATCH
@@ -164,11 +164,11 @@ BEGIN
                 t.LOAN_NO, 
                 t.[DATE],
                 ROW_NUMBER() OVER (PARTITION BY t.M_NO, t.LOAN_NO ORDER BY t.[DATE]) AS rn
-            FROM [dbo].[MEMBER_LOANS] t
+            FROM [dbo].[PLOAN1] t
         )
         UPDATE ml
         SET OPERATOR = 'CWO'
-        FROM [dbo].[MEMBER_LOANS] ml
+        FROM [dbo].[PLOAN1] ml
         INNER JOIN FirstTransactions ft ON 
             ml.M_NO = ft.M_NO AND 
             ml.LOAN_NO = ft.LOAN_NO AND 
@@ -180,7 +180,7 @@ BEGIN
                COUNT(*) as records_marked,
                COUNT(DISTINCT M_NO) as accounts_marked,
                COUNT(DISTINCT LOAN_NO) as loans_marked
-        FROM [dbo].[MEMBER_LOANS]
+        FROM [dbo].[PLOAN1]
         WHERE OPERATOR = 'CWO';
     END TRY
     BEGIN CATCH
@@ -233,7 +233,7 @@ BEGIN
                 END
         ) as row_seq
     INTO #verification_check
-    FROM [dbo].[MEMBER_LOANS];
+    FROM [dbo].[PLOAN1];
     
     -- Find loans with balance discrepancies
     WITH BalanceCheck AS (
@@ -273,15 +273,15 @@ BEGIN
     )
     SELECT 
         'Balance verification complete' as step,
-        (SELECT COUNT(*) FROM [dbo].[MEMBER_LOANS]) as total_records,
-        (SELECT COUNT(DISTINCT M_NO) FROM [dbo].[MEMBER_LOANS]) as total_accounts,
-        (SELECT COUNT(DISTINCT LOAN_NO) FROM [dbo].[MEMBER_LOANS]) as total_loans,
-        (SELECT COUNT(*) FROM [dbo].[MEMBER_LOANS] WHERE OPERATOR = 'CWO') as total_cwo_records,
-        (SELECT COUNT(*) FROM [dbo].[MEMBER_LOANS] WHERE PRINCIPLE IS NOT NULL OR INTEREST IS NOT NULL) as total_credit_transactions,
-        (SELECT COUNT(*) FROM [dbo].[MEMBER_LOANS] WHERE DEBIT IS NOT NULL) as total_debit_transactions,
-        (SELECT SUM(ISNULL(PRINCIPLE, 0)) FROM [dbo].[MEMBER_LOANS]) as total_principles,
-        (SELECT SUM(ISNULL(INTEREST, 0)) FROM [dbo].[MEMBER_LOANS]) as total_interests,
-        (SELECT SUM(ISNULL(DEBIT, 0)) FROM [dbo].[MEMBER_LOANS]) as total_debits,
+        (SELECT COUNT(*) FROM [dbo].[PLOAN1]) as total_records,
+        (SELECT COUNT(DISTINCT M_NO) FROM [dbo].[PLOAN1]) as total_accounts,
+        (SELECT COUNT(DISTINCT LOAN_NO) FROM [dbo].[PLOAN1]) as total_loans,
+        (SELECT COUNT(*) FROM [dbo].[PLOAN1] WHERE OPERATOR = 'CWO') as total_cwo_records,
+        (SELECT COUNT(*) FROM [dbo].[PLOAN1] WHERE PRINCIPLE IS NOT NULL OR INTEREST IS NOT NULL) as total_credit_transactions,
+        (SELECT COUNT(*) FROM [dbo].[PLOAN1] WHERE DEBIT IS NOT NULL) as total_debit_transactions,
+        (SELECT SUM(ISNULL(PRINCIPLE, 0)) FROM [dbo].[PLOAN1]) as total_principles,
+        (SELECT SUM(ISNULL(INTEREST, 0)) FROM [dbo].[PLOAN1]) as total_interests,
+        (SELECT SUM(ISNULL(DEBIT, 0)) FROM [dbo].[PLOAN1]) as total_debits,
         (SELECT COUNT(DISTINCT CONCAT(M_NO, '-', LOAN_NO)) FROM Discrepancies) as loans_with_discrepancies,
         (SELECT COUNT(*) FROM Discrepancies) as total_discrepancies,
         (SELECT MAX(discrepancy_amount) FROM Discrepancies) as max_discrepancy_amount;
@@ -311,5 +311,5 @@ SELECT
     c.is_nullable
 FROM sys.columns c
 INNER JOIN sys.types t ON c.user_type_id = t.user_type_id
-WHERE object_id = OBJECT_ID('[dbo].[MEMBER_LOANS]')
+WHERE object_id = OBJECT_ID('[dbo].[PLOAN1]')
 ORDER BY c.column_id;
