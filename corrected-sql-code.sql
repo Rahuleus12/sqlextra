@@ -40,29 +40,50 @@ BEGIN
             DROP TABLE #temp_ordered_transactions;
 
         -- Create a more reliable ordering system that properly handles same-day transactions
+        -- First create a table with sequential IDs for tie-breaking
+        IF OBJECT_ID('tempdb..#temp_ids') IS NOT NULL
+            DROP TABLE #temp_ids;
+            
+        SELECT 
+            ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS seq_id,
+            M_NO,
+            LOAN_NO,
+            [DATE],
+            PRINCIPLE,
+            INTEREST,
+            DEBIT,
+            OPERATOR
+        INTO #temp_ids
+        FROM [dbo].[PLOAN1];
+        
+        -- Now create the ordered transactions using the sequential IDs
         SELECT 
             t.*,
             ROW_NUMBER() OVER (
-                PARTITION BY M_NO, LOAN_NO
+                PARTITION BY t.M_NO, t.LOAN_NO
                 ORDER BY 
-                    [DATE], 
+                    t.[DATE], 
                     -- Make sure CWO (opening balance) comes first within a day
-                    CASE WHEN OPERATOR = 'CWO' THEN 0 ELSE 1 END,
+                    CASE WHEN t.OPERATOR = 'CWO' THEN 0 ELSE 1 END,
                     -- Then handle credits (principle/interest) before debits
                     CASE 
-                        WHEN (PRINCIPLE IS NOT NULL OR INTEREST IS NOT NULL) AND DEBIT IS NULL THEN 1
-                        WHEN DEBIT IS NOT NULL AND (PRINCIPLE IS NULL AND INTEREST IS NULL) THEN 2
+                        WHEN (t.PRINCIPLE IS NOT NULL OR t.INTEREST IS NOT NULL) AND t.DEBIT IS NULL THEN 1
+                        WHEN t.DEBIT IS NOT NULL AND (t.PRINCIPLE IS NULL AND t.INTEREST IS NULL) THEN 2
                         ELSE 3 -- Both or neither
                     END,
-                    -- Unique identifier to ensure consistent ordering for rows with identical values
-                    (SELECT $IDENTITY FROM [dbo].[PLOAN1] i WHERE i.M_NO = t.M_NO AND i.LOAN_NO = t.LOAN_NO AND i.[DATE] = t.[DATE] 
-                        AND ISNULL(i.PRINCIPLE, 0) = ISNULL(t.PRINCIPLE, 0) 
-                        AND ISNULL(i.INTEREST, 0) = ISNULL(t.INTEREST, 0)
-                        AND ISNULL(i.DEBIT, 0) = ISNULL(t.DEBIT, 0)
-                        AND ISNULL(i.OPERATOR, '') = ISNULL(t.OPERATOR, ''))
+                    -- Use the sequential ID for stable ordering
+                    id.seq_id
             ) as row_seq
         INTO #temp_ordered_transactions
-        FROM [dbo].[PLOAN1] t;
+        FROM [dbo].[PLOAN1] t
+        INNER JOIN #temp_ids id ON 
+            t.M_NO = id.M_NO AND
+            t.LOAN_NO = id.LOAN_NO AND
+            t.[DATE] = id.[DATE] AND
+            ISNULL(t.PRINCIPLE, 0) = ISNULL(id.PRINCIPLE, 0) AND
+            ISNULL(t.INTEREST, 0) = ISNULL(id.INTEREST, 0) AND
+            ISNULL(t.DEBIT, 0) = ISNULL(id.DEBIT, 0) AND
+            ISNULL(t.OPERATOR, '') = ISNULL(id.OPERATOR, '');
 
         -- Add identity column to ensure unique matching during update
         ALTER TABLE #temp_ordered_transactions ADD tmp_id INT IDENTITY(1,1) PRIMARY KEY;
@@ -208,32 +229,60 @@ BEGIN
     SET NOCOUNT ON;
     
     -- Create a temp table with the correct ordering for accurate balance verification
-    IF OBJECT_ID('tempdb..#verification_check') IS NOT NULL
-        DROP TABLE #verification_check;
+    IF OBJECT_ID('tempdb..#verification_ids') IS NOT NULL
+        DROP TABLE #verification_ids;
         
+    -- First create sequential IDs for stable ordering
     SELECT 
+        ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS seq_id,
         M_NO,
         LOAN_NO,
         [DATE],
-        DEBIT,
         PRINCIPLE,
         INTEREST,
-        TOTAL,
-        BALANCE,
+        DEBIT,
         OPERATOR,
+        BALANCE,
+        TOTAL
+    INTO #verification_ids
+    FROM [dbo].[PLOAN1];
+    
+    IF OBJECT_ID('tempdb..#verification_check') IS NOT NULL
+        DROP TABLE #verification_check;
+        
+    -- Now create the verification table with proper ordering
+    SELECT 
+        v.M_NO,
+        v.LOAN_NO,
+        v.[DATE],
+        v.DEBIT,
+        v.PRINCIPLE,
+        v.INTEREST,
+        v.TOTAL,
+        v.BALANCE,
+        v.OPERATOR,
         ROW_NUMBER() OVER (
-            PARTITION BY M_NO, LOAN_NO
+            PARTITION BY v.M_NO, v.LOAN_NO
             ORDER BY 
-                [DATE], 
-                CASE WHEN OPERATOR = 'CWO' THEN 0 ELSE 1 END,
+                v.[DATE], 
+                CASE WHEN v.OPERATOR = 'CWO' THEN 0 ELSE 1 END,
                 CASE 
-                    WHEN (PRINCIPLE IS NOT NULL OR INTEREST IS NOT NULL) AND DEBIT IS NULL THEN 1
-                    WHEN DEBIT IS NOT NULL AND (PRINCIPLE IS NULL AND INTEREST IS NULL) THEN 2
+                    WHEN (v.PRINCIPLE IS NOT NULL OR v.INTEREST IS NOT NULL) AND v.DEBIT IS NULL THEN 1
+                    WHEN v.DEBIT IS NOT NULL AND (v.PRINCIPLE IS NULL AND v.INTEREST IS NULL) THEN 2
                     ELSE 3
-                END
+                END,
+                id.seq_id
         ) as row_seq
     INTO #verification_check
-    FROM [dbo].[PLOAN1];
+    FROM [dbo].[PLOAN1] v
+    INNER JOIN #verification_ids id ON 
+        v.M_NO = id.M_NO AND
+        v.LOAN_NO = id.LOAN_NO AND
+        v.[DATE] = id.[DATE] AND
+        ISNULL(v.PRINCIPLE, 0) = ISNULL(id.PRINCIPLE, 0) AND
+        ISNULL(v.INTEREST, 0) = ISNULL(id.INTEREST, 0) AND
+        ISNULL(v.DEBIT, 0) = ISNULL(id.DEBIT, 0) AND
+        ISNULL(v.OPERATOR, '') = ISNULL(id.OPERATOR, '');
     
     -- Find loans with balance discrepancies
     WITH BalanceCheck AS (
