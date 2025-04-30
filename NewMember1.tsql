@@ -1,5 +1,5 @@
--- This script will work with an existing cwizbank_adani database and MEMBER1 table
--- Modified to handle multiple transactions per member on the same date
+-- High-Performance Script for MEMBER1 Balance Calculation
+-- Optimized for speed and reliability with large datasets
 
 USE cwizbank_adani;
 GO
@@ -15,14 +15,7 @@ FROM INFORMATION_SCHEMA.COLUMNS
 WHERE TABLE_NAME = 'MEMBER1';
 GO
 
--- Create index for better performance
-IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_MEMBER1_Account_Date' AND object_id = OBJECT_ID('[dbo].[MEMBER1]'))
-BEGIN
-    CREATE INDEX IX_MEMBER1_Account_Date ON [dbo].[MEMBER1] (E_NO, M_NO, [DATE]);
-END
-GO
-
--- Add TRANS_ID column if it doesn't exist
+-- Check if we need to add TRANS_ID for unique identification
 IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('MEMBER1') AND name = 'TRANS_ID')
 BEGIN
     ALTER TABLE [dbo].[MEMBER1] ADD TRANS_ID INT IDENTITY(1,1);
@@ -30,260 +23,271 @@ BEGIN
 END
 GO
 
--- Create or alter the balance calculation procedure
-IF EXISTS (SELECT * FROM sys.objects WHERE type = 'P' AND name = 'update_member1_balances')
+-- Add necessary indexes for performance optimization
+IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_MEMBER1_MNo_Date_TransID' AND object_id = OBJECT_ID('[dbo].[MEMBER1]'))
 BEGIN
-    DROP PROCEDURE [dbo].[update_member1_balances]
+    CREATE INDEX IX_MEMBER1_MNo_Date_TransID ON [dbo].[MEMBER1] (M_NO, [DATE], TRANS_ID);
+    PRINT 'Created optimized index for better performance';
 END
 GO
 
-CREATE PROCEDURE [dbo].[update_member1_balances]
+-- Create or alter the high-performance balance calculation procedure
+IF EXISTS (SELECT * FROM sys.objects WHERE type = 'P' AND name = 'update_member1_balances_fast')
+BEGIN
+    DROP PROCEDURE [dbo].[update_member1_balances_fast]
+END
+GO
+
+CREATE PROCEDURE [dbo].[update_member1_balances_fast]
 AS
 BEGIN
     SET NOCOUNT ON;
     
+    -- Performance optimization: Use table variable instead of temp table for small result sets
+    -- and temp table for larger result sets with proper indexing
+    DECLARE @ProcessingStats TABLE (
+        Accounts_Processed INT,
+        Total_Records INT,
+        Earliest_Date DATE,
+        Latest_Date DATE,
+        Total_Credits DECIMAL(16,2),
+        Total_Debits DECIMAL(16,2),
+        Net_Balance DECIMAL(16,2)
+    );
+    
     BEGIN TRY
-        -- Create temporary table with ordered transactions
-        IF OBJECT_ID('tempdb..#temp_ordered_transactions') IS NOT NULL
-            DROP TABLE #temp_ordered_transactions;
-
-        SELECT 
-            t.*,
-            ROW_NUMBER() OVER (
-                PARTITION BY M_NO 
-                ORDER BY [DATE], 
-                         CASE WHEN OPERATOR = 'CWO' THEN 0 ELSE 1 END,
-                         CASE WHEN CREDIT IS NOT NULL THEN 0 ELSE 1 END,
-                         TRANS_ID -- Using TRANS_ID to ensure consistent ordering for same-date transactions
-            ) as row_seq
-        INTO #temp_ordered_transactions
-        FROM [dbo].[MEMBER1] t;
-
-        -- Process each member
-        DECLARE @current_m_no VARCHAR(10)
-        DECLARE @running_balance DECIMAL(10,2)
-        DECLARE @max_seq INT
-        DECLARE @current_seq INT
-        DECLARE @current_credit DECIMAL(10,2)
-        DECLARE @current_debit DECIMAL(10,2)
-        DECLARE @earliest_date DATE
-        DECLARE @latest_date DATE
-        DECLARE @total_credits DECIMAL(10,2) = 0
-        DECLARE @total_debits DECIMAL(10,2) = 0
-        DECLARE @accounts_processed INT = 0
-        DECLARE @current_trans_id INT
-
-        -- Cursor for processing each member
-        DECLARE member_cursor CURSOR LOCAL FAST_FORWARD FOR 
-            SELECT DISTINCT M_NO 
-            FROM #temp_ordered_transactions 
-            ORDER BY M_NO;
-
-        OPEN member_cursor
-        FETCH NEXT FROM member_cursor INTO @current_m_no
-
-        WHILE @@FETCH_STATUS = 0
-        BEGIN
-            SET @running_balance = 0
+        -- STEP 1: Create a temporary table with window functions to calculate running balances in one pass
+        -- This approach eliminates the need for cursors which are the main performance bottleneck
+        IF OBJECT_ID('tempdb..#calculated_balances') IS NOT NULL
+            DROP TABLE #calculated_balances;
             
-            SELECT @max_seq = MAX(row_seq)
-            FROM #temp_ordered_transactions
-            WHERE M_NO = @current_m_no
-
-            SET @current_seq = 1
-
-            WHILE @current_seq <= @max_seq
-            BEGIN
-                SELECT 
-                    @current_credit = ISNULL(CREDIT, 0),
-                    @current_debit = ISNULL(DEBIT, 0),
-                    @current_trans_id = TRANS_ID
-                FROM #temp_ordered_transactions
-                WHERE M_NO = @current_m_no
-                AND row_seq = @current_seq
-
-                SET @running_balance = @running_balance + @current_credit - @current_debit
-
-                -- Update by TRANS_ID for guaranteed unique row identification
-                UPDATE [dbo].[MEMBER1]
-                SET BALANCE = @running_balance
-                WHERE TRANS_ID = @current_trans_id
-
-                SET @current_seq = @current_seq + 1
-            END
-
-            SET @accounts_processed = @accounts_processed + 1
-            
-            -- Accumulate totals for this member
+        -- Calculate all balances in a single efficient query using window functions
+        WITH OrderedTransactions AS (
             SELECT 
-                @total_credits = @total_credits + ISNULL(SUM(CREDIT), 0),
-                @total_debits = @total_debits + ISNULL(SUM(DEBIT), 0)
-            FROM #temp_ordered_transactions
-            WHERE M_NO = @current_m_no;
-
-            FETCH NEXT FROM member_cursor INTO @current_m_no
-        END
-
-        CLOSE member_cursor
-        DEALLOCATE member_cursor
-
-        -- Get date range
+                TRANS_ID,
+                M_NO,
+                [DATE],
+                OPERATOR,
+                ISNULL(CREDIT, 0) AS CREDIT_AMT,
+                ISNULL(DEBIT, 0) AS DEBIT_AMT,
+                ROW_NUMBER() OVER (
+                    PARTITION BY M_NO 
+                    ORDER BY [DATE], 
+                             CASE WHEN OPERATOR = 'CWO' THEN 0 ELSE 1 END,
+                             TRANS_ID
+                ) AS RowNum
+            FROM dbo.MEMBER1
+        )
         SELECT 
-            @earliest_date = MIN([DATE]),
-            @latest_date = MAX([DATE])
-        FROM [dbo].[MEMBER1];
-
-        -- Return summary
+            TRANS_ID,
+            M_NO,
+            [DATE],
+            CREDIT_AMT,
+            DEBIT_AMT,
+            SUM(CREDIT_AMT - DEBIT_AMT) OVER (
+                PARTITION BY M_NO
+                ORDER BY RowNum
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            ) AS BALANCE
+        INTO #calculated_balances
+        FROM OrderedTransactions;
+        
+        -- Create index on the temp table for faster updates
+        CREATE CLUSTERED INDEX IX_Calc_Balances ON #calculated_balances (TRANS_ID);
+        
+        -- STEP 2: Fast bulk update using the calculated balances
+        -- This is much faster than row-by-row updates in a cursor
+        UPDATE m
+        SET m.BALANCE = cb.BALANCE
+        FROM dbo.MEMBER1 m
+        INNER JOIN #calculated_balances cb ON m.TRANS_ID = cb.TRANS_ID;
+        
+        -- STEP 3: Collect statistics for the summary report
+        INSERT INTO @ProcessingStats (
+            Accounts_Processed,
+            Total_Records,
+            Earliest_Date,
+            Latest_Date,
+            Total_Credits,
+            Total_Debits,
+            Net_Balance
+        )
+        SELECT 
+            COUNT(DISTINCT M_NO),
+            COUNT(*),
+            MIN([DATE]),
+            MAX([DATE]),
+            SUM(CREDIT_AMT),
+            SUM(DEBIT_AMT),
+            SUM(CREDIT_AMT) - SUM(DEBIT_AMT)
+        FROM #calculated_balances;
+        
+        -- Return the summary statistics
         SELECT 
             'Balance calculation complete' as step,
-            @accounts_processed as accounts_processed,
-            COUNT(*) as total_records,
-            @earliest_date as earliest_date,
-            @latest_date as latest_date,
-            @total_credits as total_credits,
-            @total_debits as total_debits,
-            @total_credits - @total_debits as net_balance
-        FROM [dbo].[MEMBER1];
+            Accounts_Processed as accounts_processed,
+            Total_Records as total_records,
+            Earliest_Date as earliest_date,
+            Latest_Date as latest_date,
+            Total_Credits as total_credits,
+            Total_Debits as total_debits,
+            Net_Balance as net_balance
+        FROM @ProcessingStats;
 
     END TRY
     BEGIN CATCH
         SELECT 
             ERROR_NUMBER() AS ErrorNumber,
-            ERROR_MESSAGE() AS ErrorMessage;
+            ERROR_MESSAGE() AS ErrorMessage,
+            ERROR_LINE() AS ErrorLine,
+            ERROR_PROCEDURE() AS ErrorProcedure;
     END CATCH
 END;
 GO
 
--- Create procedure to mark opening balances
-IF EXISTS (SELECT * FROM sys.objects WHERE type = 'P' AND name = 'mark_member1_opening_balances')
+-- Create optimized procedure to mark opening balances
+IF EXISTS (SELECT * FROM sys.objects WHERE type = 'P' AND name = 'mark_member1_opening_balances_fast')
 BEGIN
-    DROP PROCEDURE [dbo].[mark_member1_opening_balances]
+    DROP PROCEDURE [dbo].[mark_member1_opening_balances_fast]
 END
 GO
 
-CREATE PROCEDURE [dbo].[mark_member1_opening_balances]
+CREATE PROCEDURE [dbo].[mark_member1_opening_balances_fast]
 AS
 BEGIN
     SET NOCOUNT ON;
     
     BEGIN TRY
-        -- Create temporary table with first transaction dates
-        IF OBJECT_ID('tempdb..#first_transactions') IS NOT NULL
-            DROP TABLE #first_transactions;
-
-        SELECT M_NO, MIN([DATE]) as first_date
-        INTO #first_transactions
-        FROM [dbo].[MEMBER1]
-        GROUP BY M_NO;
-
-        -- Mark transactions with the earliest date for each member as CWO
-        -- Use a JOIN with TRANS_ID to ensure unique records are updated
+        -- Use a single, set-based operation to mark opening balances
+        -- This is much faster than using a cursor or temporary table approach
+        WITH FirstTransactions AS (
+            SELECT 
+                TRANS_ID,
+                ROW_NUMBER() OVER (PARTITION BY M_NO ORDER BY [DATE], TRANS_ID) AS RowNum
+            FROM dbo.MEMBER1
+        )
         UPDATE m
         SET OPERATOR = 'CWO'
-        FROM [dbo].[MEMBER1] m
-        INNER JOIN #first_transactions ft ON m.M_NO = ft.M_NO AND m.[DATE] = ft.first_date;
+        FROM dbo.MEMBER1 m
+        INNER JOIN FirstTransactions ft ON m.TRANS_ID = ft.TRANS_ID
+        WHERE ft.RowNum = 1;
 
         -- Return summary
-        SELECT 'Opening balances marked' as step,
-               COUNT(*) as records_marked,
-               COUNT(DISTINCT M_NO) as accounts_marked
-        FROM [dbo].[MEMBER1]
+        SELECT 
+            'Opening balances marked' as step,
+            COUNT(*) as records_marked,
+            COUNT(DISTINCT M_NO) as accounts_marked
+        FROM dbo.MEMBER1
         WHERE OPERATOR = 'CWO';
     END TRY
     BEGIN CATCH
         SELECT 
             ERROR_NUMBER() AS ErrorNumber,
-            ERROR_MESSAGE() AS ErrorMessage;
+            ERROR_MESSAGE() AS ErrorMessage,
+            ERROR_LINE() AS ErrorLine,
+            ERROR_PROCEDURE() AS ErrorProcedure;
     END CATCH
 END;
 GO
 
--- Create procedure to verify balances
-IF EXISTS (SELECT * FROM sys.objects WHERE type = 'P' AND name = 'verify_member1_balances')
+-- Create optimized procedure to verify balances
+IF EXISTS (SELECT * FROM sys.objects WHERE type = 'P' AND name = 'verify_member1_balances_fast')
 BEGIN
-    DROP PROCEDURE [dbo].[verify_member1_balances]
+    DROP PROCEDURE [dbo].[verify_member1_balances_fast]
 END
 GO
 
-CREATE PROCEDURE [dbo].[verify_member1_balances]
+CREATE PROCEDURE [dbo].[verify_member1_balances_fast]
 AS
 BEGIN
     SET NOCOUNT ON;
     
-    -- Create a temporary table for ordered transactions
-    IF OBJECT_ID('tempdb..#ordered_trans_for_verify') IS NOT NULL
-        DROP TABLE #ordered_trans_for_verify;
-
-    SELECT 
-        t.*,
-        ROW_NUMBER() OVER (
-            PARTITION BY M_NO 
-            ORDER BY [DATE], 
-                     CASE WHEN OPERATOR = 'CWO' THEN 0 ELSE 1 END,
-                     CASE WHEN CREDIT IS NOT NULL THEN 0 ELSE 1 END,
-                     TRANS_ID
-        ) as row_seq
-    INTO #ordered_trans_for_verify
-    FROM [dbo].[MEMBER1] t;
-
-    -- Verify balances
-    WITH BalanceCheck AS (
+    -- Fast verification using set-based operations
+    WITH OrderedTransactions AS (
         SELECT 
+            TRANS_ID,
             M_NO,
             [DATE],
-            TRANS_ID,
-            DEBIT,
-            CREDIT,
+            OPERATOR,
+            ISNULL(CREDIT, 0) AS CREDIT_AMT,
+            ISNULL(DEBIT, 0) AS DEBIT_AMT,
             BALANCE,
-            LAG(BALANCE) OVER (PARTITION BY M_NO ORDER BY row_seq) as prev_balance,
-            ISNULL(CREDIT, 0) - ISNULL(DEBIT, 0) as expected_change
-        FROM #ordered_trans_for_verify
+            ROW_NUMBER() OVER (
+                PARTITION BY M_NO 
+                ORDER BY [DATE], 
+                         CASE WHEN OPERATOR = 'CWO' THEN 0 ELSE 1 END,
+                         TRANS_ID
+            ) AS RowNum
+        FROM dbo.MEMBER1
+    ),
+    BalanceCheck AS (
+        SELECT 
+            TRANS_ID,
+            M_NO,
+            [DATE],
+            CREDIT_AMT,
+            DEBIT_AMT,
+            BALANCE,
+            LAG(BALANCE) OVER (PARTITION BY M_NO ORDER BY RowNum) AS PrevBalance,
+            CREDIT_AMT - DEBIT_AMT AS ExpectedChange,
+            OPERATOR
+        FROM OrderedTransactions
+    ),
+    CorrectBalances AS (
+        SELECT
+            TRANS_ID,
+            M_NO,
+            [DATE],
+            BALANCE,
+            -- For first row of each member, PrevBalance is NULL, so expected balance is just this row's change
+            -- For other rows, expected balance is previous balance + this row's change
+            CASE 
+                WHEN PrevBalance IS NULL THEN CREDIT_AMT - DEBIT_AMT
+                ELSE PrevBalance + CREDIT_AMT - DEBIT_AMT
+            END AS ExpectedBalance,
+            -- Flag incorrect balances
+            CASE 
+                WHEN PrevBalance IS NULL AND ABS(BALANCE - (CREDIT_AMT - DEBIT_AMT)) > 0.01 THEN 1
+                WHEN PrevBalance IS NOT NULL AND ABS(BALANCE - (PrevBalance + CREDIT_AMT - DEBIT_AMT)) > 0.01 THEN 1
+                ELSE 0
+            END AS IsIncorrect,
+            OPERATOR
+        FROM BalanceCheck
     )
     SELECT 
-        'Balance verification complete' as step,
-        COUNT(*) as total_records,
-        COUNT(DISTINCT M_NO) as total_accounts,
-        SUM(CASE WHEN bc.TRANS_ID IN (SELECT TRANS_ID FROM [dbo].[MEMBER1] WHERE OPERATOR = 'CWO') THEN 1 ELSE 0 END) as total_cwo_records,
-        SUM(CASE WHEN CREDIT IS NOT NULL THEN 1 ELSE 0 END) as total_credit_transactions,
-        SUM(CASE WHEN DEBIT IS NOT NULL THEN 1 ELSE 0 END) as total_debit_transactions,
-        SUM(ISNULL(CREDIT, 0)) as total_credits,
-        SUM(ISNULL(DEBIT, 0)) as total_debits,
-        SUM(ISNULL(CREDIT, 0)) - SUM(ISNULL(DEBIT, 0)) as net_balance,
-        COUNT(CASE WHEN ABS(ISNULL(BALANCE - prev_balance, 0) - expected_change) > 0.01 THEN 1 END) as incorrect_balances
-    FROM BalanceCheck bc;
+        'Balance verification complete' AS step,
+        COUNT(*) AS total_records,
+        COUNT(DISTINCT M_NO) AS total_accounts,
+        SUM(CASE WHEN OPERATOR = 'CWO' THEN 1 ELSE 0 END) AS total_cwo_records,
+        SUM(CASE WHEN IsIncorrect = 1 THEN 1 ELSE 0 END) AS incorrect_balances,
+        CASE 
+            WHEN SUM(CASE WHEN IsIncorrect = 1 THEN 1 ELSE 0 END) > 0 THEN 'FAILED: Some balances are incorrect'
+            ELSE 'PASSED: All balances are correct'
+        END AS verification_result
+    FROM CorrectBalances;
 END
 GO
 
--- Print current table structure
-SELECT 
-    c.name as column_name,
-    t.name as data_type,
-    c.max_length,
-    c.precision,
-    c.scale,
-    c.is_nullable
-FROM sys.columns c
-INNER JOIN sys.types t ON c.user_type_id = t.user_type_id
-WHERE object_id = OBJECT_ID('[dbo].[MEMBER1]')
-ORDER BY c.column_id;
-
 -- Instructions for use:
 PRINT '
-To process balances in your MEMBER1 table:
+TO USE THE HIGH-PERFORMANCE BALANCE CALCULATION:
 
 1. First mark opening balances:
-   EXEC [dbo].[mark_member1_opening_balances];
+   EXEC [dbo].[mark_member1_opening_balances_fast];
 
 2. Then calculate all balances:
-   EXEC [dbo].[update_member1_balances];
+   EXEC [dbo].[update_member1_balances_fast];
 
 3. Finally verify the results:
-   EXEC [dbo].[verify_member1_balances];
+   EXEC [dbo].[verify_member1_balances_fast];
 
-Note: This script will add a TRANS_ID column (if not already present) to ensure unique identification 
-of transactions, especially when multiple transactions occur on the same date for the same member.
+PERFORMANCE NOTES:
+- This optimized version uses set-based operations instead of cursors for dramatically improved speed
+- Window functions perform the balance calculations in a single table scan
+- All operations are performed in bulk for maximum SQL Server efficiency
+- For very large tables (millions of rows), consider adding a WITH (TABLOCK) hint to further improve performance
 
-Required columns in your MEMBER1 table:
+Required columns:
 - E_NO (VARCHAR)
 - M_NO (VARCHAR)
 - DATE (DATE or DATETIME)
@@ -292,6 +296,4 @@ Required columns in your MEMBER1 table:
 - BALANCE (DECIMAL)
 - OPERATOR (VARCHAR)
 - TRANS_ID (INT) - Will be added if not present
-
-Additional columns in your table will not affect the balance calculation.
 ';
