@@ -202,69 +202,96 @@ AS
 BEGIN
     SET NOCOUNT ON;
     
-    -- Fast verification using set-based operations
-    WITH OrderedTransactions AS (
-        SELECT 
-            TRANS_ID,
-            M_NO,
-            [DATE],
-            OPERATOR,
-            ISNULL(CREDIT, 0) AS CREDIT_AMT,
-            ISNULL(DEBIT, 0) AS DEBIT_AMT,
-            BALANCE,
-            ROW_NUMBER() OVER (
-                PARTITION BY M_NO 
-                ORDER BY [DATE], 
-                         CASE WHEN OPERATOR = 'CWO' THEN 0 ELSE 1 END,
-                         TRANS_ID
-            ) AS RowNum
-        FROM dbo.MEMBER1
-    ),
-    BalanceCheck AS (
-        SELECT 
-            TRANS_ID,
-            M_NO,
-            [DATE],
-            CREDIT_AMT,
-            DEBIT_AMT,
-            BALANCE,
-            LAG(BALANCE) OVER (PARTITION BY M_NO ORDER BY RowNum) AS PrevBalance,
-            CREDIT_AMT - DEBIT_AMT AS ExpectedChange,
-            OPERATOR
-        FROM OrderedTransactions
-    ),
-    CorrectBalances AS (
-        SELECT
-            TRANS_ID,
-            M_NO,
-            [DATE],
-            BALANCE,
-            -- For first row of each member, PrevBalance is NULL, so expected balance is just this row's change
-            -- For other rows, expected balance is previous balance + this row's change
+    -- Create a temporary table to store verification results
+    -- This avoids aggregating with a subquery which can be inefficient
+    IF OBJECT_ID('tempdb..#balance_verification') IS NOT NULL
+        DROP TABLE #balance_verification;
+    
+    -- First, materialize the incremental balance checks in a temp table
+    -- This is more efficient than using nested CTEs with aggregations
+    SELECT 
+        TRANS_ID,
+        M_NO,
+        [DATE],
+        OPERATOR,
+        ISNULL(CREDIT, 0) AS CREDIT_AMT,
+        ISNULL(DEBIT, 0) AS DEBIT_AMT,
+        BALANCE,
+        ROW_NUMBER() OVER (
+            PARTITION BY M_NO 
+            ORDER BY [DATE], 
+                     CASE WHEN OPERATOR = 'CWO' THEN 0 ELSE 1 END,
+                     TRANS_ID
+        ) AS RowNum
+    INTO #balance_verification
+    FROM dbo.MEMBER1;
+    
+    -- Create clustered index for performance
+    CREATE CLUSTERED INDEX IX_BalanceVerify ON #balance_verification (M_NO, RowNum);
+    
+    -- Now add the previous balance and expected balance columns
+    ALTER TABLE #balance_verification ADD 
+        PrevBalance DECIMAL(16,2) NULL,
+        ExpectedBalance DECIMAL(16,2) NULL,
+        IsIncorrect BIT NOT NULL DEFAULT 0;
+    
+    -- Update the previous balance values
+    UPDATE bv
+    SET PrevBalance = prev.BALANCE
+    FROM #balance_verification bv
+    LEFT JOIN #balance_verification prev 
+        ON bv.M_NO = prev.M_NO 
+        AND bv.RowNum = prev.RowNum + 1;
+    
+    -- Calculate expected balances and identify incorrect ones
+    UPDATE #balance_verification
+    SET ExpectedBalance = 
             CASE 
                 WHEN PrevBalance IS NULL THEN CREDIT_AMT - DEBIT_AMT
                 ELSE PrevBalance + CREDIT_AMT - DEBIT_AMT
-            END AS ExpectedBalance,
-            -- Flag incorrect balances
+            END,
+        IsIncorrect = 
             CASE 
                 WHEN PrevBalance IS NULL AND ABS(BALANCE - (CREDIT_AMT - DEBIT_AMT)) > 0.01 THEN 1
                 WHEN PrevBalance IS NOT NULL AND ABS(BALANCE - (PrevBalance + CREDIT_AMT - DEBIT_AMT)) > 0.01 THEN 1
                 ELSE 0
-            END AS IsIncorrect,
-            OPERATOR
-        FROM BalanceCheck
-    )
+            END;
+    
+    -- Now do a single aggregation to get the summary
+    DECLARE @incorrect_count INT;
+    
+    SELECT 
+        @incorrect_count = SUM(CASE WHEN IsIncorrect = 1 THEN 1 ELSE 0 END)
+    FROM #balance_verification;
+    
+    -- Return the summary without nested aggregations
     SELECT 
         'Balance verification complete' AS step,
         COUNT(*) AS total_records,
         COUNT(DISTINCT M_NO) AS total_accounts,
         SUM(CASE WHEN OPERATOR = 'CWO' THEN 1 ELSE 0 END) AS total_cwo_records,
-        SUM(CASE WHEN IsIncorrect = 1 THEN 1 ELSE 0 END) AS incorrect_balances,
+        @incorrect_count AS incorrect_balances,
         CASE 
-            WHEN SUM(CASE WHEN IsIncorrect = 1 THEN 1 ELSE 0 END) > 0 THEN 'FAILED: Some balances are incorrect'
+            WHEN @incorrect_count > 0 THEN 'FAILED: Some balances are incorrect'
             ELSE 'PASSED: All balances are correct'
         END AS verification_result
-    FROM CorrectBalances;
+    FROM #balance_verification;
+    
+    -- Optionally show the incorrect balances for debugging
+    IF @incorrect_count > 0
+    BEGIN
+        SELECT TOP 100
+            M_NO,
+            [DATE],
+            CREDIT_AMT,
+            DEBIT_AMT,
+            BALANCE AS actual_balance,
+            ExpectedBalance AS expected_balance,
+            BALANCE - ExpectedBalance AS balance_difference
+        FROM #balance_verification
+        WHERE IsIncorrect = 1
+        ORDER BY ABS(BALANCE - ExpectedBalance) DESC;
+    END
 END
 GO
 
