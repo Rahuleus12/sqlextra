@@ -1,5 +1,5 @@
--- High-Performance Script for MEMBER1 Balance Calculation
--- Optimized for speed and reliability with large datasets
+-- High-Performance Script for MEMBER1 Balance Calculation with Ledger-Style Output
+-- Optimized for speed, reliability, and traditional accounting ledger format
 
 USE cwizbank_adani;
 GO
@@ -15,11 +15,80 @@ FROM INFORMATION_SCHEMA.COLUMNS
 WHERE TABLE_NAME = 'MEMBER1';
 GO
 
+-- Add required ledger columns if they don't exist
+DECLARE @ColumnsAdded BIT = 0;
+
 -- Check if we need to add TRANS_ID for unique identification
 IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('MEMBER1') AND name = 'TRANS_ID')
 BEGIN
     ALTER TABLE [dbo].[MEMBER1] ADD TRANS_ID INT IDENTITY(1,1);
+    SET @ColumnsAdded = 1;
     PRINT 'Added TRANS_ID column for unique transaction identification';
+END
+
+-- Check if we need to add DESCRIPTION for transaction details
+IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('MEMBER1') AND name = 'DESCRIPTION')
+BEGIN
+    ALTER TABLE [dbo].[MEMBER1] ADD DESCRIPTION NVARCHAR(255) NULL;
+    SET @ColumnsAdded = 1;
+    PRINT 'Added DESCRIPTION column for transaction details';
+END
+
+-- Check if we need to add TRANSACTION_TYPE for categorization
+IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('MEMBER1') AND name = 'TRANSACTION_TYPE')
+BEGIN
+    ALTER TABLE [dbo].[MEMBER1] ADD TRANSACTION_TYPE VARCHAR(50) NULL;
+    SET @ColumnsAdded = 1;
+    PRINT 'Added TRANSACTION_TYPE column for transaction categorization';
+END
+
+-- Check if we need to add REFERENCE_NO for transaction references
+IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('MEMBER1') AND name = 'REFERENCE_NO')
+BEGIN
+    ALTER TABLE [dbo].[MEMBER1] ADD REFERENCE_NO VARCHAR(50) NULL;
+    SET @ColumnsAdded = 1;
+    PRINT 'Added REFERENCE_NO column for transaction references';
+END
+
+-- Check if we need to add RUNNING_BALANCE for cumulative balance
+IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('MEMBER1') AND name = 'RUNNING_BALANCE')
+BEGIN
+    ALTER TABLE [dbo].[MEMBER1] ADD RUNNING_BALANCE DECIMAL(16,2) NULL;
+    SET @ColumnsAdded = 1;
+    PRINT 'Added RUNNING_BALANCE column for cumulative balance tracking';
+END
+
+-- Populate transaction types based on existing data if columns were added
+IF @ColumnsAdded = 1
+BEGIN
+    -- Initialize transaction types based on existing data pattern
+    UPDATE [dbo].[MEMBER1] 
+    SET TRANSACTION_TYPE = 
+        CASE 
+            WHEN OPERATOR = 'CWO' THEN 'Opening Balance'
+            WHEN CREDIT IS NOT NULL AND CREDIT > 0 THEN 'Deposit'
+            WHEN DEBIT IS NOT NULL AND DEBIT > 0 THEN 'Withdrawal'
+            ELSE 'Transaction'
+        END
+    WHERE TRANSACTION_TYPE IS NULL;
+    
+    -- Initialize descriptions based on transaction types
+    UPDATE [dbo].[MEMBER1]
+    SET DESCRIPTION = 
+        CASE TRANSACTION_TYPE
+            WHEN 'Opening Balance' THEN 'Opening Balance'
+            WHEN 'Deposit' THEN 'Deposit - ' + CONVERT(VARCHAR, [DATE], 106)
+            WHEN 'Withdrawal' THEN 'Withdrawal - ' + CONVERT(VARCHAR, [DATE], 106)
+            ELSE 'Transaction - ' + CONVERT(VARCHAR, [DATE], 106)
+        END
+    WHERE DESCRIPTION IS NULL;
+    
+    -- Initialize reference numbers as placeholders
+    UPDATE [dbo].[MEMBER1]
+    SET REFERENCE_NO = 'REF-' + RIGHT('00000000' + CAST(TRANS_ID AS VARCHAR), 8)
+    WHERE REFERENCE_NO IS NULL;
+    
+    PRINT 'Initialized ledger columns with default values based on existing data';
 END
 GO
 
