@@ -58,8 +58,7 @@ BEGIN
         -- STEP 2: Fast bulk update using the calculated balances
         -- This is much faster than row-by-row updates in a cursor
         UPDATE m
-        SET m.BALANCE = cb.BALANCE,
-            m.RUNNING_BALANCE = cb.BALANCE -- Also update the RUNNING_BALANCE column if you intend to use it
+        SET m.BALANCE = cb.BALANCE
         FROM dbo.MEMBER1 m
         INNER JOIN #calculated_balances cb ON m.TRANS_ID = cb.TRANS_ID;
 
@@ -134,6 +133,4 @@ Required columns:
 - BALANCE (DECIMAL)
 - OPERATOR (VARCHAR)
 - TRANS_ID (INT) - Must be a unique identifier for each transaction
-- RUNNING_BALANCE (DECIMAL) - Will be updated with the calculated balance
 ';
-
