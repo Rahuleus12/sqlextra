@@ -1,3 +1,4 @@
+-- Modified original script with explicit ASC for TRANS_ID in ROW_NUMBER
 -- Create or alter the high-performance balance calculation procedure
 IF EXISTS (SELECT * FROM sys.objects WHERE type = 'P' AND name = 'update_member1_balances_fast')
 BEGIN
@@ -23,7 +24,8 @@ BEGIN
     );
 
     BEGIN TRY
-        -- STEP 1: Create a temporary table with window functions to calculate running balances based on TRANS_ID in ascending order
+        -- STEP 1: Create a temporary table with window functions to calculate running balances in one pass
+        -- This approach eliminates the need for cursors which are the main performance bottleneck
         IF OBJECT_ID('tempdb..#calculated_balances') IS NOT NULL
             DROP TABLE #calculated_balances;
 
@@ -35,7 +37,13 @@ BEGIN
                 [DATE],
                 OPERATOR,
                 ISNULL(CREDIT, 0) AS CREDIT_AMT,
-                ISNULL(DEBIT, 0) AS DEBIT_AMT
+                ISNULL(DEBIT, 0) AS DEBIT_AMT,
+                ROW_NUMBER() OVER (
+                    PARTITION BY M_NO
+                    ORDER BY [DATE] ASC, -- Explicit ASC
+                             CASE WHEN OPERATOR = 'CWO' THEN 0 ELSE 1 END,
+                             TRANS_ID ASC  -- Explicit ASC
+                ) AS RowNum
             FROM dbo.MEMBER1
         )
         SELECT
@@ -46,7 +54,7 @@ BEGIN
             DEBIT_AMT,
             SUM(CREDIT_AMT - DEBIT_AMT) OVER (
                 PARTITION BY M_NO
-                ORDER BY TRANS_ID ASC -- Explicitly order by TRANS_ID in ascending order
+                ORDER BY RowNum ASC -- Explicit ASC
                 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
             ) AS BALANCE
         INTO #calculated_balances
@@ -132,5 +140,5 @@ Required columns:
 - CREDIT (DECIMAL)
 - BALANCE (DECIMAL)
 - OPERATOR (VARCHAR)
-- TRANS_ID (INT) - Must be a unique identifier for each transaction representing the ledger order
+- TRANS_ID (INT) - Will be added if not present
 ';
