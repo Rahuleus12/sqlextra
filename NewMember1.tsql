@@ -23,7 +23,7 @@ BEGIN
     );
 
     BEGIN TRY
-        -- STEP 1: Create a temporary table with window functions to calculate running balances based on TRANS_ID
+        -- STEP 1: Create a temporary table with window functions to calculate running balances based on TRANS_ID in ascending order
         IF OBJECT_ID('tempdb..#calculated_balances') IS NOT NULL
             DROP TABLE #calculated_balances;
 
@@ -46,7 +46,7 @@ BEGIN
             DEBIT_AMT,
             SUM(CREDIT_AMT - DEBIT_AMT) OVER (
                 PARTITION BY M_NO
-                ORDER BY TRANS_ID -- Crucial change: Order by the unique transaction identifier
+                ORDER BY TRANS_ID ASC -- Explicitly order by TRANS_ID in ascending order
                 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
             ) AS BALANCE
         INTO #calculated_balances
@@ -132,5 +132,5 @@ Required columns:
 - CREDIT (DECIMAL)
 - BALANCE (DECIMAL)
 - OPERATOR (VARCHAR)
-- TRANS_ID (INT) - Must be a unique identifier for each transaction
+- TRANS_ID (INT) - Must be a unique identifier for each transaction representing the ledger order
 ';
