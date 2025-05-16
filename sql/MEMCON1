@@ -137,22 +137,23 @@ BEGIN
                 [DATE],
                 OPERATOR,
                 ISNULL(CREDIT, 0) AS CREDIT_AMT,
-                ISNULL(DEBIT, 0) AS DEBIT_AMT
+                ISNULL(DEBIT, 0) AS DEBIT_AMT,
+                ROW_NUMBER() OVER (PARTITION BY M_NO ORDER BY TRANS_ID ASC) AS RowNum -- Simplified RowNum based solely on TRANS_ID
             FROM dbo.MEMCON1
         )
         SELECT
-            TRANS_ID,
-            M_NO,
-            [DATE],
-            CREDIT_AMT,
-            DEBIT_AMT,
-            SUM(CREDIT_AMT - DEBIT_AMT) OVER (
-                PARTITION BY M_NO
-                ORDER BY TRANS_ID ASC -- Crucial change: Order by the unique transaction identifier in ascending order
+            ot.TRANS_ID,
+            ot.M_NO,
+            ot.[DATE],
+            ot.CREDIT_AMT,
+            ot.DEBIT_AMT,
+            SUM(ot.CREDIT_AMT - ot.DEBIT_AMT) OVER (
+                PARTITION BY ot.M_NO
+                ORDER BY ot.RowNum ASC -- Order the summation by the calculated RowNum
                 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
             ) AS BALANCE
         INTO #calculated_balances
-        FROM OrderedTransactions;
+        FROM OrderedTransactions ot;
 
         -- Create index on the temp table for faster updates
         CREATE CLUSTERED INDEX IX_Calc_Balances ON #calculated_balances (TRANS_ID);
@@ -170,9 +171,9 @@ BEGIN
             Total_Records,
             Earliest_Date,
             Latest_Date,
-            Total_Credits DECIMAL(16,2),
-            Total_Debits DECIMAL(16,2),
-            Net_Balance DECIMAL(16,2)
+            Total_Credits,
+            Total_Debits,
+            Net_Balance
         )
         SELECT
             COUNT(DISTINCT M_NO),
