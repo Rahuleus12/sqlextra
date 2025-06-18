@@ -1,14 +1,43 @@
-IF EXISTS (SELECT * FROM sys.objects WHERE type = 'P' AND name = 'update_SAVING1_balances_fast')
+USE cwizbank_adani;
+GO
+
+-- Verify the table structure
+SELECT COLUMN_NAME as column_name,
+       DATA_TYPE as data_type,
+       CHARACTER_MAXIMUM_LENGTH as max_length,
+       NUMERIC_PRECISION as precision,
+       NUMERIC_SCALE as scale,
+       IS_NULLABLE as is_nullable
+FROM INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_NAME = 'SAVING1';
+GO
+
+-- Add TRANS_ID if not already present
+IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('SAVING1') AND name = 'TRANS_ID')
 BEGIN
-    DROP PROCEDURE [dbo].[update_SAVING1_balances_fast]
+    ALTER TABLE [dbo].[SAVING1] ADD TRANS_ID INT IDENTITY(1,1);
+    PRINT 'Added TRANS_ID column for unique transaction identification';
 END
+GO
+
+-- Create necessary index
+IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_SAVING1_MNo_Date_TransID' AND object_id = OBJECT_ID('[dbo].[SAVING1]'))
+BEGIN
+    CREATE INDEX IX_SAVING1_MNo_Date_TransID ON [dbo].[SAVING1] (MNO, [DATE], TRANS_ID);
+    PRINT 'Created optimized index for better performance';
+END
+GO
+
+-- Drop and recreate balance update procedure
+IF EXISTS (SELECT * FROM sys.objects WHERE type = 'P' AND name = 'update_SAVING1_balances_fast')
+    DROP PROCEDURE [dbo].[update_SAVING1_balances_fast];
 GO
 
 CREATE PROCEDURE [dbo].[update_SAVING1_balances_fast]
 AS
 BEGIN
     SET NOCOUNT ON;
-    
+
     DECLARE @ProcessingStats TABLE (
         Accounts_Processed INT,
         Total_Records INT,
@@ -20,11 +49,9 @@ BEGIN
     );
 
     BEGIN TRY
-        -- Drop temp table if exists
         IF OBJECT_ID('tempdb..#calculated_balances') IS NOT NULL
             DROP TABLE #calculated_balances;
 
-        -- Calculate balances with precise order
         WITH OrderedTransactions AS (
             SELECT 
                 TRANS_ID,
@@ -46,31 +73,20 @@ BEGIN
             DEBIT_AMT,
             SUM(CREDIT_AMT - DEBIT_AMT) OVER (
                 PARTITION BY MNO
-                ORDER BY [DATE], TRANS_ID
+                ORDER BY RowNum
                 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
             ) AS BALANCE
         INTO #calculated_balances
         FROM OrderedTransactions;
 
-        -- Index for performance
         CREATE CLUSTERED INDEX IX_Calc_Balances ON #calculated_balances (TRANS_ID);
 
-        -- Fast update
         UPDATE m
         SET m.BALANCE = cb.BALANCE
         FROM dbo.SAVING1 m
         INNER JOIN #calculated_balances cb ON m.TRANS_ID = cb.TRANS_ID;
 
-        -- Summary
-        INSERT INTO @ProcessingStats (
-            Accounts_Processed,
-            Total_Records,
-            Earliest_Date,
-            Latest_Date,
-            Total_Credits,
-            Total_Debits,
-            Net_Balance
-        )
+        INSERT INTO @ProcessingStats
         SELECT 
             COUNT(DISTINCT MNO),
             COUNT(*),
@@ -102,3 +118,128 @@ BEGIN
     END CATCH
 END;
 GO
+
+-- Drop and recreate mark opening balances procedure
+IF EXISTS (SELECT * FROM sys.objects WHERE type = 'P' AND name = 'mark_SAVING1_opening_balances_fast')
+    DROP PROCEDURE [dbo].[mark_SAVING1_opening_balances_fast];
+GO
+
+CREATE PROCEDURE [dbo].[mark_SAVING1_opening_balances_fast]
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    BEGIN TRY
+        WITH FirstTransactions AS (
+            SELECT 
+                TRANS_ID,
+                ROW_NUMBER() OVER (PARTITION BY MNO ORDER BY [DATE], TRANS_ID) AS RowNum
+            FROM dbo.SAVING1
+        )
+        UPDATE m
+        SET OPERATOR = 'CWO'
+        FROM dbo.SAVING1 m
+        INNER JOIN FirstTransactions ft ON m.TRANS_ID = ft.TRANS_ID
+        WHERE ft.RowNum = 1;
+
+        SELECT 
+            'Opening balances marked' as step,
+            COUNT(*) as records_marked,
+            COUNT(DISTINCT MNO) as accounts_marked
+        FROM dbo.SAVING1
+        WHERE OPERATOR = 'CWO';
+
+    END TRY
+    BEGIN CATCH
+        SELECT 
+            ERROR_NUMBER() AS ErrorNumber,
+            ERROR_MESSAGE() AS ErrorMessage,
+            ERROR_LINE() AS ErrorLine,
+            ERROR_PROCEDURE() AS ErrorProcedure;
+    END CATCH
+END;
+GO
+
+-- Drop and recreate verify balances procedure
+IF EXISTS (SELECT * FROM sys.objects WHERE type = 'P' AND name = 'verify_SAVING1_balances_fast')
+    DROP PROCEDURE [dbo].[verify_SAVING1_balances_fast];
+GO
+
+CREATE PROCEDURE [dbo].[verify_SAVING1_balances_fast]
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    WITH OrderedTransactions AS (
+        SELECT 
+            TRANS_ID,
+            MNO,
+            [DATE],
+            ISNULL(CREDIT, 0) AS CREDIT_AMT,
+            ISNULL(DEBIT, 0) AS DEBIT_AMT,
+            BALANCE,
+            ROW_NUMBER() OVER (
+                PARTITION BY MNO 
+                ORDER BY [DATE], TRANS_ID
+            ) AS RowNum
+        FROM dbo.SAVING1
+    ),
+    BalanceCheck AS (
+        SELECT 
+            TRANS_ID,
+            MNO,
+            [DATE],
+            CREDIT_AMT,
+            DEBIT_AMT,
+            BALANCE,
+            LAG(BALANCE) OVER (PARTITION BY MNO ORDER BY RowNum) AS PrevBalance
+        FROM OrderedTransactions
+    ),
+    CorrectBalances AS (
+        SELECT
+            TRANS_ID,
+            MNO,
+            [DATE],
+            BALANCE,
+            CASE 
+                WHEN PrevBalance IS NULL THEN CREDIT_AMT - DEBIT_AMT
+                ELSE PrevBalance + CREDIT_AMT - DEBIT_AMT
+            END AS ExpectedBalance,
+            CASE 
+                WHEN PrevBalance IS NULL AND ABS(BALANCE - (CREDIT_AMT - DEBIT_AMT)) > 0.01 THEN 1
+                WHEN PrevBalance IS NOT NULL AND ABS(BALANCE - (PrevBalance + CREDIT_AMT - DEBIT_AMT)) > 0.01 THEN 1
+                ELSE 0
+            END AS IsIncorrect
+        FROM BalanceCheck
+    )
+    SELECT 
+        'Balance verification complete' AS step,
+        COUNT(*) AS total_records,
+        COUNT(DISTINCT MNO) AS total_accounts,
+        SUM(CASE WHEN IsIncorrect = 1 THEN 1 ELSE 0 END) AS incorrect_balances,
+        CASE 
+            WHEN SUM(CASE WHEN IsIncorrect = 1 THEN 1 ELSE 0 END) > 0 THEN 'FAILED: Some balances are incorrect'
+            ELSE 'PASSED: All balances are correct'
+        END AS verification_result
+    FROM CorrectBalances;
+END;
+GO
+
+-- Summary usage instructions
+PRINT '
+TO USE THE HIGH-PERFORMANCE BALANCE CALCULATION:
+
+1. First mark opening balances:
+   EXEC [dbo].[mark_SAVING1_opening_balances_fast];
+
+2. Then calculate all balances:
+   EXEC [dbo].[update_SAVING1_balances_fast];
+
+3. Finally verify the results:
+   EXEC [dbo].[verify_SAVING1_balances_fast];
+
+IMPORTANT FIXES:
+- Removed operator-based sorting (which caused transactions to be skipped)
+- Used only [DATE], TRANS_ID ordering for accuracy
+- All set-based operations for high performance and reliability
+';
