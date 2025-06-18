@@ -125,41 +125,30 @@ BEGIN
     );
 
     BEGIN TRY
-        -- STEP 1: Create a temporary table with window functions to calculate running balances based on TRANS_ID
+        -- STEP 1: Calculate running balances directly ordering by TRANS_ID
+        -- This ensures each distinct TRANS_ID is treated as a separate, ordered transaction.
         IF OBJECT_ID('tempdb..#calculated_balances') IS NOT NULL
             DROP TABLE #calculated_balances;
 
-        -- Calculate all balances in a single efficient query using window functions
-        WITH OrderedTransactions AS (
-            SELECT
-                TRANS_ID,
-                M_NO,
-                [DATE],
-                OPERATOR,
-                ISNULL(CREDIT, 0) AS CREDIT_AMT,
-                ISNULL(DEBIT, 0) AS DEBIT_AMT,
-                ROW_NUMBER() OVER (PARTITION BY M_NO ORDER BY TRANS_ID ASC) AS RowNum -- Simplified RowNum based solely on TRANS_ID
-            FROM dbo.MEMCON1
-        )
         SELECT
-            ot.TRANS_ID,
-            ot.M_NO,
-            ot.[DATE],
-            ot.CREDIT_AMT,
-            ot.DEBIT_AMT,
-            SUM(ot.CREDIT_AMT - ot.DEBIT_AMT) OVER (
-                PARTITION BY ot.M_NO
-                ORDER BY ot.RowNum ASC -- Order the summation by the calculated RowNum
+            TRANS_ID,
+            M_NO,
+            [DATE],
+            OPERATOR,
+            ISNULL(CREDIT, 0) AS CREDIT_AMT,
+            ISNULL(DEBIT, 0) AS DEBIT_AMT,
+            SUM(ISNULL(CREDIT, 0) - ISNULL(DEBIT, 0)) OVER (
+                PARTITION BY M_NO
+                ORDER BY TRANS_ID ASC -- Directly order by the unique transaction identifier
                 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
             ) AS BALANCE
         INTO #calculated_balances
-        FROM OrderedTransactions ot;
+        FROM dbo.MEMCON1;
 
         -- Create index on the temp table for faster updates
         CREATE CLUSTERED INDEX IX_Calc_Balances ON #calculated_balances (TRANS_ID);
 
         -- STEP 2: Fast bulk update using the calculated balances
-        -- This is much faster than row-by-row updates in a cursor
         UPDATE m
         SET m.BALANCE = cb.BALANCE
         FROM dbo.MEMCON1 m
