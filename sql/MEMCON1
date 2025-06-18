@@ -1,43 +1,3 @@
----
-## High-Performance Script for SAVING1 Balance Calculation - Enhanced Version
----
--- Optimized for speed and reliability with large datasets
-
-USE cwizbank_adani;
-GO
-
--- First verify the table structure
-SELECT COLUMN_NAME AS column_name,
-       DATA_TYPE AS data_type,
-       CHARACTER_MAXIMUM_LENGTH AS max_length,
-       NUMERIC_PRECISION AS precision,
-       NUMERIC_SCALE AS scale,
-       IS_NULLABLE AS is_nullable
-FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_NAME = 'SAVING1';
-GO
-
--- Check if we need to add TRANS_ID for unique identification
-IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('SAVING1') AND name = 'TRANS_ID')
-BEGIN
-    ALTER TABLE [dbo].[SAVING1] ADD TRANS_ID INT IDENTITY(1,1);
-    PRINT 'Added TRANS_ID column for unique transaction identification';
-END
-GO
-
--- Add necessary indexes for performance optimization
--- Ensure indexes are created with appropriate fill factor and online options for production
-IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_SAVING1_MNo_Date_TransID' AND object_id = OBJECT_ID('[dbo].[SAVING1]'))
-BEGIN
-    -- Consider ONLINE = ON for minimal downtime on large tables (Enterprise Edition only)
-    CREATE INDEX IX_SAVING1_MNo_Date_TransID ON [dbo].[SAVING1] (MNO, [DATE], TRANS_ID) WITH (FILLFACTOR = 90);
-    PRINT 'Created optimized index for better performance';
-END
-GO
-
----
-## Create or Alter High-Performance Balance Calculation Procedure
----
 IF EXISTS (SELECT * FROM sys.objects WHERE type = 'P' AND name = 'update_SAVING1_balances_fast')
 BEGIN
     DROP PROCEDURE [dbo].[update_SAVING1_balances_fast]
@@ -48,8 +8,7 @@ CREATE PROCEDURE [dbo].[update_SAVING1_balances_fast]
 AS
 BEGIN
     SET NOCOUNT ON;
-    SET XACT_ABORT ON; -- Abort transaction on runtime error
-
+    
     DECLARE @ProcessingStats TABLE (
         Accounts_Processed INT,
         Total_Records INT,
@@ -57,41 +16,29 @@ BEGIN
         Latest_Date DATE,
         Total_Credits DECIMAL(16,2),
         Total_Debits DECIMAL(16,2),
-        Net_Balance DECIMAL(16,2),
-        Execution_Start_Time DATETIME,
-        Execution_End_Time DATETIME,
-        Duration_Seconds INT
+        Net_Balance DECIMAL(16,2)
     );
 
-    DECLARE @StartTime DATETIME = GETDATE();
-
     BEGIN TRY
-        BEGIN TRANSACTION; -- Start transaction for atomicity
-
-        -- STEP 1: Create a temporary table with window functions to calculate running balances in one pass
+        -- Drop temp table if exists
         IF OBJECT_ID('tempdb..#calculated_balances') IS NOT NULL
             DROP TABLE #calculated_balances;
 
-        -- Calculate all balances in a single efficient query using window functions
-        -- Using a CTE for clarity and logical separation
+        -- Calculate balances with precise order
         WITH OrderedTransactions AS (
-            SELECT
+            SELECT 
                 TRANS_ID,
                 MNO,
                 [DATE],
-                OPERATOR,
                 ISNULL(CREDIT, 0) AS CREDIT_AMT,
                 ISNULL(DEBIT, 0) AS DEBIT_AMT,
                 ROW_NUMBER() OVER (
-                    PARTITION BY MNO
-                    ORDER BY [DATE],
-                             -- Ensure 'CWO' (Credit Write-Off/Opening) transactions are processed first on a given date for correct opening balance
-                             CASE WHEN OPERATOR = 'CWO' THEN 0 ELSE 1 END,
-                             TRANS_ID
+                    PARTITION BY MNO 
+                    ORDER BY [DATE], TRANS_ID
                 ) AS RowNum
-            FROM dbo.SAVING1 WITH (NOLOCK) -- Use NOLOCK for read consistency without blocking, if acceptable
+            FROM dbo.SAVING1
         )
-        SELECT
+        SELECT 
             TRANS_ID,
             MNO,
             [DATE],
@@ -99,28 +46,22 @@ BEGIN
             DEBIT_AMT,
             SUM(CREDIT_AMT - DEBIT_AMT) OVER (
                 PARTITION BY MNO
-                ORDER BY RowNum
+                ORDER BY [DATE], TRANS_ID
                 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
             ) AS BALANCE
         INTO #calculated_balances
         FROM OrderedTransactions;
 
-        -- Create index on the temp table for faster updates
-        -- A clustered index is usually best for JOINs in updates
+        -- Index for performance
         CREATE CLUSTERED INDEX IX_Calc_Balances ON #calculated_balances (TRANS_ID);
 
-        -- STEP 2: Fast bulk update using the calculated balances
-        -- Use TABLOCKX or other appropriate hints for large updates
+        -- Fast update
         UPDATE m
         SET m.BALANCE = cb.BALANCE
-        FROM dbo.SAVING1 AS m WITH (TABLOCKX) -- Explicit lock hint for large-scale updates
-        INNER JOIN #calculated_balances AS cb ON m.TRANS_ID = cb.TRANS_ID;
+        FROM dbo.SAVING1 m
+        INNER JOIN #calculated_balances cb ON m.TRANS_ID = cb.TRANS_ID;
 
-        COMMIT TRANSACTION; -- Commit transaction if successful
-
-        -- STEP 3: Collect statistics for the summary report
-        DECLARE @EndTime DATETIME = GETDATE();
-
+        -- Summary
         INSERT INTO @ProcessingStats (
             Accounts_Processed,
             Total_Records,
@@ -128,50 +69,32 @@ BEGIN
             Latest_Date,
             Total_Credits,
             Total_Debits,
-            Net_Balance,
-            Execution_Start_Time,
-            Execution_End_Time,
-            Duration_Seconds
+            Net_Balance
         )
-        SELECT
+        SELECT 
             COUNT(DISTINCT MNO),
             COUNT(*),
             MIN([DATE]),
             MAX([DATE]),
             SUM(CREDIT_AMT),
             SUM(DEBIT_AMT),
-            SUM(CREDIT_AMT) - SUM(DEBIT_AMT),
-            @StartTime,
-            @EndTime,
-            DATEDIFF(SECOND, @StartTime, @EndTime)
+            SUM(CREDIT_AMT) - SUM(DEBIT_AMT)
         FROM #calculated_balances;
 
-        -- Return the summary statistics
-        SELECT
-            'Balance calculation complete' AS step,
-            Accounts_Processed AS accounts_processed,
-            Total_Records AS total_records,
-            Earliest_Date AS earliest_date,
-            Latest_Date AS latest_date,
-            Total_Credits AS total_credits,
-            Total_Debits AS total_debits,
-            Net_Balance AS net_balance,
-            Execution_Start_Time AS execution_start_time,
-            Execution_End_Time AS execution_end_time,
-            Duration_Seconds AS duration_seconds
+        SELECT 
+            'Balance calculation complete' as step,
+            Accounts_Processed,
+            Total_Records,
+            Earliest_Date,
+            Latest_Date,
+            Total_Credits,
+            Total_Debits,
+            Net_Balance
         FROM @ProcessingStats;
 
     END TRY
     BEGIN CATCH
-        IF @@TRANCOUNT > 0
-            ROLLBACK TRANSACTION; -- Rollback on error
-
-        -- Log error details to a dedicated error logging table in a production environment
-        -- INSERT INTO ErrorLogTable (ErrorNumber, ErrorMessage, ErrorLine, ErrorProcedure, ErrorTime)
-        -- VALUES (ERROR_NUMBER(), ERROR_MESSAGE(), ERROR_LINE(), ERROR_PROCEDURE(), GETDATE());
-
-        SELECT
-            'Error during balance calculation' AS step,
+        SELECT 
             ERROR_NUMBER() AS ErrorNumber,
             ERROR_MESSAGE() AS ErrorMessage,
             ERROR_LINE() AS ErrorLine,
@@ -179,197 +102,3 @@ BEGIN
     END CATCH
 END;
 GO
-
----
-## Create Optimized Procedure to Mark Opening Balances
----
-IF EXISTS (SELECT * FROM sys.objects WHERE type = 'P' AND name = 'mark_SAVING1_opening_balances_fast')
-BEGIN
-    DROP PROCEDURE [dbo].[mark_SAVING1_opening_balances_fast]
-END
-GO
-
-CREATE PROCEDURE [dbo].[mark_SAVING1_opening_balances_fast]
-AS
-BEGIN
-    SET NOCOUNT ON;
-    SET XACT_ABORT ON;
-
-    DECLARE @RecordsMarked INT;
-    DECLARE @AccountsMarked INT;
-
-    BEGIN TRY
-        BEGIN TRANSACTION;
-
-        -- Use a single, set-based operation to mark opening balances
-        WITH FirstTransactions AS (
-            SELECT
-                TRANS_ID,
-                ROW_NUMBER() OVER (PARTITION BY MNO ORDER BY [DATE], TRANS_ID) AS RowNum
-            FROM dbo.SAVING1 WITH (NOLOCK)
-        )
-        UPDATE m
-        SET OPERATOR = 'CWO'
-        FROM dbo.SAVING1 AS m WITH (TABLOCKX)
-        INNER JOIN FirstTransactions AS ft ON m.TRANS_ID = ft.TRANS_ID
-        WHERE ft.RowNum = 1;
-
-        SET @RecordsMarked = @@ROWCOUNT; -- Get number of rows affected
-
-        SELECT @AccountsMarked = COUNT(DISTINCT MNO)
-        FROM dbo.SAVING1 WITH (NOLOCK)
-        WHERE OPERATOR = 'CWO';
-
-        COMMIT TRANSACTION;
-
-        -- Return summary
-        SELECT
-            'Opening balances marked' AS step,
-            @RecordsMarked AS records_marked,
-            @AccountsMarked AS accounts_marked;
-    END TRY
-    BEGIN CATCH
-        IF @@TRANCOUNT > 0
-            ROLLBACK TRANSACTION;
-
-        SELECT
-            'Error during opening balance marking' AS step,
-            ERROR_NUMBER() AS ErrorNumber,
-            ERROR_MESSAGE() AS ErrorMessage,
-            ERROR_LINE() AS ErrorLine,
-            ERROR_PROCEDURE() AS ErrorProcedure;
-    END CATCH
-END;
-GO
-
----
-## Create Optimized Procedure to Verify Balances
----
-IF EXISTS (SELECT * FROM sys.objects WHERE type = 'P' AND name = 'verify_SAVING1_balances_fast')
-BEGIN
-    DROP PROCEDURE [dbo].[verify_SAVING1_balances_fast]
-END
-GO
-
-CREATE PROCEDURE [dbo].[verify_SAVING1_balances_fast]
-AS
-BEGIN
-    SET NOCOUNT ON;
-    SET XACT_ABORT ON;
-
-    BEGIN TRY
-        -- Fast verification using set-based operations
-        -- No transaction needed here as it's a read-only operation
-        WITH OrderedTransactions AS (
-            SELECT
-                TRANS_ID,
-                MNO,
-                [DATE],
-                OPERATOR,
-                ISNULL(CREDIT, 0) AS CREDIT_AMT,
-                ISNULL(DEBIT, 0) AS DEBIT_AMT,
-                BALANCE,
-                ROW_NUMBER() OVER (
-                    PARTITION BY MNO
-                    ORDER BY [DATE],
-                             CASE WHEN OPERATOR = 'CWO' THEN 0 ELSE 1 END,
-                             TRANS_ID
-                ) AS RowNum
-            FROM dbo.SAVING1 WITH (NOLOCK) -- Use NOLOCK for read consistency
-        ),
-        BalanceCheck AS (
-            SELECT
-                TRANS_ID,
-                MNO,
-                [DATE],
-                CREDIT_AMT,
-                DEBIT_AMT,
-                BALANCE,
-                LAG(BALANCE) OVER (PARTITION BY MNO ORDER BY RowNum) AS PrevBalance,
-                -- No need for ExpectedChange as it's directly used in CorrectBalances CTE
-                OPERATOR,
-                RowNum
-            FROM OrderedTransactions
-        ),
-        CorrectBalances AS (
-            SELECT
-                TRANS_ID,
-                MNO,
-                [DATE],
-                BALANCE,
-                -- For first row of each member, PrevBalance is NULL, so expected balance is just this row's change
-                -- For other rows, expected balance is previous balance + this row's change
-                CASE
-                    WHEN PrevBalance IS NULL THEN CREDIT_AMT - DEBIT_AMT
-                    ELSE PrevBalance + CREDIT_AMT - DEBIT_AMT
-                END AS ExpectedCalculatedBalance, -- Renamed for clarity
-                -- Flag incorrect balances based on a small tolerance for floating-point arithmetic issues
-                CASE
-                    WHEN ABS(BALANCE - (CASE WHEN PrevBalance IS NULL THEN CREDIT_AMT - DEBIT_AMT ELSE PrevBalance + CREDIT_AMT - DEBIT_AMT END)) > 0.005 THEN 1 -- Tolerance of 0.005
-                    ELSE 0
-                END AS IsIncorrect,
-                OPERATOR
-            FROM BalanceCheck
-        )
-        SELECT
-            'Balance verification complete' AS step,
-            COUNT(*) AS total_records,
-            COUNT(DISTINCT MNO) AS total_accounts,
-            SUM(CASE WHEN OPERATOR = 'CWO' THEN 1 ELSE 0 END) AS total_cwo_records,
-            SUM(CASE WHEN IsIncorrect = 1 THEN 1 ELSE 0 END) AS incorrect_balances,
-            CASE
-                WHEN SUM(CASE WHEN IsIncorrect = 1 THEN 1 ELSE 0 END) > 0 THEN 'FAILED: Some balances are incorrect'
-                ELSE 'PASSED: All balances are correct'
-            END AS verification_result,
-            GETDATE() AS verification_time
-        FROM CorrectBalances;
-    END TRY
-    BEGIN CATCH
-        SELECT
-            'Error during balance verification' AS step,
-            ERROR_NUMBER() AS ErrorNumber,
-            ERROR_MESSAGE() AS ErrorMessage,
-            ERROR_LINE() AS ErrorLine,
-            ERROR_PROCEDURE() AS ErrorProcedure;
-    END CATCH
-END;
-GO
-
----
-## Instructions for Use and Performance Notes
----
-PRINT '
-TO USE THE HIGH-PERFORMANCE BALANCE CALCULATION:
-
-1.  **Mark Opening Balances:** This step identifies the initial transaction for each member, setting its OPERATOR to ''CWO''.
-    EXEC [dbo].[mark_SAVING1_opening_balances_fast];
-
-2.  **Calculate All Balances:** This procedure computes the running balance for all transactions based on credits and debits.
-    EXEC [dbo].[update_SAVING1_balances_fast];
-
-3.  **Verify Results:** After calculation, this step checks the accuracy of the computed balances.
-    EXEC [dbo].[verify_SAVING1_balances_fast];
-
----
-### Performance Notes:
-* This optimized version leverages **set-based operations** and **window functions** (like `SUM() OVER ()` and `ROW_NUMBER() OVER ()`) to perform balance calculations efficiently, avoiding slow row-by-row processing (cursors).
-* All major operations are performed in **bulk** for maximum SQL Server efficiency.
-* **Indexes** (`IX_SAVING1_MNo_Date_TransID`) are crucial for speeding up data retrieval and join operations. Consider an appropriate `FILLFACTOR` for your workload.
-* **Transactions** (`BEGIN TRANSACTION`, `COMMIT TRANSACTION`, `ROLLBACK TRANSACTION`) ensure **atomicity**, meaning the entire balance calculation process for `update_SAVING1_balances_fast` and `mark_SAVING1_opening_balances_fast` is treated as a single, all-or-nothing operation. If any part fails, the entire change is rolled back, preventing data corruption.
-* `SET XACT_ABORT ON` ensures that a transaction is automatically rolled back if a runtime error occurs, which is critical for data integrity.
-* **Error Handling** with `TRY...CATCH` blocks provides graceful failure management and returns specific error details, which is vital for debugging and monitoring in a production environment.
-* `WITH (NOLOCK)` hint is used for read operations (e.g., in CTEs and `SELECT` statements within procedures). While it can reduce blocking, it might lead to "dirty reads" (reading uncommitted data). Use with caution and only if the application tolerates slightly stale data for these specific reads. For updates, `WITH (TABLOCKX)` ensures exclusive locks for the duration of the update, which can be beneficial for very large tables but will block other operations.
-* A small **tolerance** ($0.005$) is added to the balance verification due to potential floating-point precision issues with `DECIMAL` types after numerous arithmetic operations. Adjust as necessary.
-* For **very large tables** (millions of rows or more), consider additional strategies like partitioning the table or performing these operations during off-peak hours.
-
----
-### Required Columns:
-* `E_NO` (VARCHAR) - Employee Number (if applicable, though not directly used in balance logic here)
-* `MNO` (VARCHAR) - Member Number (Crucial for partitioning and grouping balances)
-* `DATE` (DATE or DATETIME) - Transaction Date (Crucial for ordering transactions)
-* `DEBIT` (DECIMAL) - Debit Amount
-* `CREDIT` (DECIMAL) - Credit Amount
-* `BALANCE` (DECIMAL) - Calculated Balance (This column will be updated)
-* `OPERATOR` (VARCHAR) - Transaction Type (e.g., 'CWO' for Credit Write-Off/Opening, 'DEP' for Deposit, 'WDL' for Withdrawal)
-* `TRANS_ID` (INT) - Unique Transaction Identifier (An `IDENTITY` column will be added if not present to ensure uniqueness and reliable ordering)
-';
