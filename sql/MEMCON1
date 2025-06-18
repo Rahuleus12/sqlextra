@@ -7,7 +7,7 @@ GO
 -- First verify the table structure
 SELECT COLUMN_NAME as column_name,
        DATA_TYPE as data_type,
-       CHARACTER_MAXIMU_LENGTH as max_length,
+       CHARACTER_MAXIMUM_LENGTH as max_length, -- Corrected typo here
        NUMERIC_PRECISION as precision,
        NUMERIC_SCALE as scale,
        IS_NULLABLE as is_nullable
@@ -122,25 +122,40 @@ BEGIN
     );
 
     BEGIN TRY
-        -- STEP 1: Calculate running balances directly ordering by TRANS_ID
-        -- This ensures each distinct TRANS_ID is treated as a separate, ordered transaction.
+        -- STEP 1: Create a temporary table with window functions to calculate running balances
+        -- based on a robust ordering: DATE, then OPERATOR (CWO first), then TRANS_ID
         IF OBJECT_ID('tempdb..#calculated_balances') IS NOT NULL
             DROP TABLE #calculated_balances;
 
+        WITH OrderedTransactions AS (
+            SELECT
+                TRANS_ID,
+                M_NO,
+                [DATE],
+                OPERATOR,
+                ISNULL(CREDIT, 0) AS CREDIT_AMT,
+                ISNULL(DEBIT, 0) AS DEBIT_AMT,
+                ROW_NUMBER() OVER (
+                    PARTITION BY M_NO
+                    ORDER BY [DATE] ASC,                     -- Primary order: Date ascending
+                             CASE WHEN OPERATOR = 'CWO' THEN 0 ELSE 1 END ASC, -- Secondary order: CWO first, then others
+                             TRANS_ID ASC                      -- Tie-breaker: Unique transaction ID
+                ) AS RowNum
+            FROM dbo.MEMCON1
+        )
         SELECT
-            TRANS_ID,
-            M_NO,
-            [DATE],
-            OPERATOR,
-            ISNULL(CREDIT, 0) AS CREDIT_AMT,
-            ISNULL(DEBIT, 0) AS DEBIT_AMT,
-            SUM(ISNULL(CREDIT, 0) - ISNULL(DEBIT, 0)) OVER (
-                PARTITION BY M_NO
-                ORDER BY TRANS_ID ASC -- Directly order by the unique transaction identifier
+            ot.TRANS_ID,
+            ot.M_NO,
+            ot.[DATE],
+            ot.CREDIT_AMT,
+            ot.DEBIT_AMT,
+            SUM(ot.CREDIT_AMT - ot.DEBIT_AMT) OVER (
+                PARTITION BY ot.M_NO
+                ORDER BY ot.RowNum ASC -- Sum by the robust RowNum sequence
                 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
             ) AS BALANCE
         INTO #calculated_balances
-        FROM dbo.MEMCON1;
+        FROM OrderedTransactions ot;
 
         -- Create index on the temp table for faster updates
         CREATE CLUSTERED INDEX IX_Calc_Balances ON #calculated_balances (TRANS_ID);
@@ -212,7 +227,7 @@ BEGIN
         WITH FirstTransactions AS (
             SELECT
                 TRANS_ID,
-                ROW_NUMBER() OVER (PARTITION BY M_NO ORDER BY [DATE], TRANS_ID) AS RowNum
+                ROW_NUMBER() OVER (PARTITION BY M_NO ORDER BY [DATE] ASC, TRANS_ID ASC) AS RowNum
             FROM dbo.MEMCON1
         )
         UPDATE m
@@ -268,9 +283,9 @@ BEGIN
         BALANCE,
         ROW_NUMBER() OVER (
             PARTITION BY M_NO
-            ORDER BY [DATE],
-                     CASE WHEN OPERATOR = 'CWO' THEN 0 ELSE 1 END,
-                     TRANS_ID
+            ORDER BY [DATE] ASC,                     -- Primary order: Date ascending
+                     CASE WHEN OPERATOR = 'CWO' THEN 0 ELSE 1 END ASC, -- Secondary order: CWO first, then others
+                     TRANS_ID ASC                      -- Tie-breaker: Unique transaction ID
         ) AS RowNum
     INTO #balance_verification
     FROM dbo.MEMCON1;
