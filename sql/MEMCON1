@@ -7,7 +7,7 @@ GO
 -- First verify the table structure
 SELECT COLUMN_NAME as column_name,
        DATA_TYPE as data_type,
-       CHARACTER_MAXIMUM_LENGTH as max_length,
+       CHARACTER_MAXIMU_LENGTH as max_length,
        NUMERIC_PRECISION as precision,
        NUMERIC_SCALE as scale,
        IS_NULLABLE as is_nullable
@@ -15,81 +15,78 @@ FROM INFORMATION_SCHEMA.COLUMNS
 WHERE TABLE_NAME = 'MEMCON1';
 GO
 
--- Add required ledger columns if they don't exist
-DECLARE @ColumnsAdded BIT = 0;
-
--- Check if we need to add TRANS_ID for unique identification
+-- Add required ledger columns if they don't exist - ensuring each is added before use
+-- TRANS_ID must be added first as others might depend on it (e.g., REFERENCE_NO generation)
 IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('MEMCON1') AND name = 'TRANS_ID')
 BEGIN
     ALTER TABLE [dbo].[MEMCON1] ADD TRANS_ID INT IDENTITY(1,1);
-    SET @ColumnsAdded = 1;
     PRINT 'Added TRANS_ID column for unique transaction identification';
 END
+GO -- Added GO after each ALTER TABLE to ensure it completes its batch
 
--- Check if we need to add DESCRIPTION for transaction details
 IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('MEMCON1') AND name = 'DESCRIPTION')
 BEGIN
     ALTER TABLE [dbo].[MEMCON1] ADD DESCRIPTION NVARCHAR(255) NULL;
-    SET @ColumnsAdded = 1;
     PRINT 'Added DESCRIPTION column for transaction details';
 END
+GO
 
--- Check if we need to add TRANSACTION_TYPE for categorization
 IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('MEMCON1') AND name = 'TRANSACTION_TYPE')
 BEGIN
     ALTER TABLE [dbo].[MEMCON1] ADD TRANSACTION_TYPE VARCHAR(50) NULL;
-    SET @ColumnsAdded = 1;
     PRINT 'Added TRANSACTION_TYPE column for transaction categorization';
 END
+GO
 
--- Check if we need to add REFERENCE_NO for transaction references
 IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('MEMCON1') AND name = 'REFERENCE_NO')
 BEGIN
     ALTER TABLE [dbo].[MEMCON1] ADD REFERENCE_NO VARCHAR(50) NULL;
-    SET @ColumnsAdded = 1;
     PRINT 'Added REFERENCE_NO column for transaction references';
 END
+GO
 
--- Check if we need to add RUNNING_BALANCE for cumulative balance
 IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('MEMCON1') AND name = 'RUNNING_BALANCE')
 BEGIN
     ALTER TABLE [dbo].[MEMCON1] ADD RUNNING_BALANCE DECIMAL(16,2) NULL;
-    SET @ColumnsAdded = 1;
     PRINT 'Added RUNNING_BALANCE column for cumulative balance tracking';
 END
+GO
 
--- Populate transaction types based on existing data if columns were added
-IF @ColumnsAdded = 1
-BEGIN
-    -- Initialize transaction types based on existing data pattern
-    UPDATE [dbo].[MEMCON1]
-    SET TRANSACTION_TYPE =
-        CASE
-            WHEN OPERATOR = 'CWO' THEN 'Opening Balance'
-            WHEN CREDIT IS NOT NULL AND CREDIT > 0 THEN 'Deposit'
-            WHEN DEBIT IS NOT NULL AND DEBIT > 0 THEN 'Withdrawal'
-            ELSE 'Transaction'
-        END
-    WHERE TRANSACTION_TYPE IS NULL;
+-- Initialize newly added ledger columns (unconditional update with WHERE NULL checks)
+-- These updates will run every time, but only affect rows where the column is NULL,
+-- or if the column was just added.
+UPDATE [dbo].[MEMCON1]
+SET TRANSACTION_TYPE =
+    CASE
+        WHEN OPERATOR = 'CWO' THEN 'Opening Balance'
+        WHEN CREDIT IS NOT NULL AND CREDIT > 0 THEN 'Deposit'
+        WHEN DEBIT IS NOT NULL AND DEBIT > 0 THEN 'Withdrawal'
+        ELSE 'Transaction'
+    END
+WHERE TRANSACTION_TYPE IS NULL;
+PRINT 'Initialized TRANSACTION_TYPE column.';
+GO
 
-    -- Initialize descriptions based on transaction types
-    UPDATE [dbo].[MEMCON1]
-    SET DESCRIPTION =
-        CASE TRANSACTION_TYPE
-            WHEN 'Opening Balance' THEN 'Opening Balance'
-            WHEN 'Deposit' THEN 'Deposit - ' + CONVERT(VARCHAR, [DATE], 106)
-            WHEN 'Withdrawal' THEN 'Withdrawal - ' + CONVERT(VARCHAR, [DATE], 106)
-            ELSE 'Transaction - ' + CONVERT(VARCHAR, [DATE], 106)
-        END
-    WHERE DESCRIPTION IS NULL;
+UPDATE [dbo].[MEMCON1]
+SET DESCRIPTION =
+    CASE TRANSACTION_TYPE
+        WHEN 'Opening Balance' THEN 'Opening Balance'
+        WHEN 'Deposit' THEN 'Deposit - ' + CONVERT(VARCHAR, [DATE], 106)
+        WHEN 'Withdrawal' THEN 'Withdrawal - ' + CONVERT(VARCHAR, [DATE], 106)
+        ELSE 'Transaction - ' + CONVERT(VARCHAR, [DATE], 106)
+    END
+WHERE DESCRIPTION IS NULL;
+PRINT 'Initialized DESCRIPTION column.';
+GO
 
-    -- Initialize reference numbers as placeholders
-    UPDATE [dbo].[MEMCON1]
-    SET REFERENCE_NO = 'REF-' + RIGHT('00000000' + CAST(TRANS_ID AS VARCHAR), 8)
-    WHERE REFERENCE_NO IS NULL;
+-- Reference number depends on TRANS_ID, so ensure TRANS_ID is populated first
+UPDATE [dbo].[MEMCON1]
+SET REFERENCE_NO = 'REF-' + RIGHT('00000000' + CAST(TRANS_ID AS VARCHAR), 8)
+WHERE REFERENCE_NO IS NULL;
+PRINT 'Initialized REFERENCE_NO column.';
+GO
 
-    PRINT 'Initialized ledger columns with default values based on existing data';
-END
+PRINT 'Ensured all ledger columns are present and initialized.';
 GO
 
 -- Add necessary indexes for performance optimization
