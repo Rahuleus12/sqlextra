@@ -62,12 +62,12 @@ BEGIN
                 TRANS_ID,
                 MNO,
                 [DATE],
-                TRANSNO,
+                
                 ISNULL(CREDIT, 0) AS CREDIT_AMT,
                 ISNULL(DEBIT, 0) AS DEBIT_AMT,
                 ROW_NUMBER() OVER (
                     PARTITION BY MNO 
-                    ORDER BY [DATE], TRANSNO, TRANS_ID
+                    ORDER BY [DATE],  TRANS_ID
                 ) AS RowNum
             FROM dbo.SAVING1
         )
@@ -132,4 +132,3 @@ BEGIN
     END CATCH
 END;
 GO
-
